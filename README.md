@@ -9,7 +9,7 @@ This project implements an ESP32-based HTTP client that receives commands via UA
 ## How to build
 1. Clone repository:
 ```
-$ git clone https://github.com/Mbsqd/uart_http_client.git
+git clone https://github.com/Mbsqd/uart_http_client.git
 ```
 2. Enter project directory
 3. Launch your ESP-IDF Enviroment
