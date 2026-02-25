@@ -1,6 +1,7 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 
+#include "parser.h"
 #include "uart.h"
 #include "http.h"
 
@@ -9,7 +10,7 @@ const uint32_t BAUD_RATE = 115200;
 const uint8_t TX_PIN = 17; 
 const uint8_t RX_PIN = 16; 
 const uint16_t RX_BUFFER = 2048; // UART buffer sizes
-const uint8_t DATA_BUFFER_SIZE = 254; // Max size for URL and body in HTTP commands
+const uint8_t DATA_BUFFER_SIZE = 255; // Max size for URL and body in HTTP commands, save last byte for null terminator
 
 static const char *TAG = "UART";
 
@@ -37,77 +38,58 @@ void uart_init()
     uart_write_bytes(UART_PORT, ready_msg, strlen(ready_msg));
 }
 
-
-// Function to parse received UART data and execute corresponding HTTP commands
-void parse_and_execute_command(char *input) {
-    // Remove \r \n from the end of the input
-    uint8_t len = strlen(input); 
-    while(len > 0 && (input[len - 1] == '\n' || input[len - 1] == '\r')) {
-        len--;
-        input[len] = '\0';
-    }
-    ESP_LOGI(TAG, "Received input: %s", input);
-
-    char *command = strtok(input, " ");
-    if (command == NULL || strcmp(command, "http") != 0) {
-        ESP_LOGW(TAG, "Received invalid command: %s", input);
-        char *return_msg = "Invalid command\r\n";
-        uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-        return;
-    }
-
-    char *method = strtok(NULL, " ");
-    if(method == NULL) {
-        ESP_LOGW(TAG, "HTTP method not specified");
-        char *return_msg = "HTTP method not specified\r\n";
-        uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-        return;
-    }
-
-    char *url = strtok(NULL, " ");
-    if(url == NULL) {
-        ESP_LOGW(TAG, "URL not specified");
-        char *return_msg = "URL not specified\r\n";
-        uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-        return;
-    }
-
-    if(strcmp(method, "GET") == 0) {
-        ESP_LOGI(TAG, "Executing HTTP GET: %s", url);
-        esp_err_t err = http_get(url);
-        if(err != ESP_OK) {
-            ESP_LOGI(TAG, "Failed HTTP GET: %s", url);
-            char *return_msg = "HTTP GET failed\r\n";
-            uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-        }
-    } else if(strcmp(method, "POST") == 0) {
-        char *body = strtok(NULL, "");
-        if(body == NULL) body = "";
-        ESP_LOGI(TAG, "Executing HTTP POST: %s with body: %s", url, body);
-        
-        if(http_post(url, body) != ESP_OK) {
-            ESP_LOGW(TAG, "Failed HTTP POST: %s", url);
-            char *return_msg = "HTTP POST failed\r\n";
-            uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-            return;
-        }
-
-        char *return_msg = "HTTP POST executed\r\n";
-        uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-    } else {
-        ESP_LOGW(TAG, "Received unsupported HTTP method: %s", method);
-        char *return_msg = "Unsupported HTTP method\r\n";
-        uart_write_bytes(UART_PORT, return_msg, strlen(return_msg));
-        return;
-    }
-
-}
-
 // Function to send a string message over UART
 void uart_send(const char *msg) {
     uart_write_bytes(UART_PORT, msg, strlen(msg));
 }
 
+// Function to parse received UART data and execute corresponding HTTP commands
+void parse_and_execute_command(char *input)
+{
+    strip_line_ending(input);
+
+    if (strlen(input) == 0) return;
+
+    ESP_LOGI(TAG, "rx: \"%s\"", input);
+
+    parsed_cmd_t cmd;
+    cmd_parse_result_t result = parse_command(input, &cmd);
+
+    switch (result) {
+        case CMD_ERR_UNKNOWN:
+            ESP_LOGW(TAG, "parse: unknown command");
+            uart_send("ERROR: unknown command\r\n");
+            return;
+
+        case CMD_ERR_NO_METHOD:
+            ESP_LOGW(TAG, "parse: missing method");
+            uart_send("ERROR: missing method\r\n");
+            return;
+
+        case CMD_ERR_NO_URL:
+            ESP_LOGW(TAG, "parse: missing url");
+            uart_send("ERROR: missing url\r\n");
+            return;
+
+        case CMD_ERR_BAD_METHOD:
+            ESP_LOGW(TAG, "parse: unsupported method");
+            uart_send("ERROR: unsupported method, use GET or POST\r\n");
+            return;
+
+        case CMD_OK:
+            break; 
+    }
+
+    if (cmd.method == HTTP_GET) {
+        ESP_LOGI(TAG, "exec: GET %s", cmd.url);
+        http_get(cmd.url);
+
+    } else if (cmd.method == HTTP_POST) {
+        const char *body = cmd.body ? cmd.body : "";
+        ESP_LOGI(TAG, "exec: POST %s body=\"%s\"", cmd.url, body);
+        http_post(cmd.url, body);
+    }
+}
 
 // FreeRTOS task to continuously read data from UART and execute commands
 void uart_read_data(void *arg) {
